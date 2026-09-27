@@ -74,20 +74,30 @@ Panel {
     PanelToolTip { text: chip.tip; visible: hover.containsMouse && chip.tip !== "" }
   }
 
-  component Stat: ColumnLayout {
+  // Equal cells: an Item with zero implicit width, so the RowLayout splits
+  // the row by preferredWidth alone instead of by how wide each number is.
+  component Stat: Item {
+    id: stat
     property string cap: ""
     property string value: ""
-    property string tip: ""
     Layout.fillWidth: true
     Layout.preferredWidth: 1
-    spacing: 0
-    Cap { text: parent.cap }
-    Text {
-      text: parent.value
-      color: panel.fg
-      font.family: panel.fontFamily
-      font.pixelSize: Style.font.subtitle + 4
-      font.bold: true
+    implicitWidth: 0
+    implicitHeight: statCol.implicitHeight
+    Column {
+      id: statCol
+      width: parent.width
+      spacing: 0
+      Cap { text: stat.cap; width: parent.width; elide: Text.ElideRight }
+      Text {
+        width: parent.width
+        elide: Text.ElideRight
+        text: stat.value
+        color: panel.fg
+        font.family: panel.fontFamily
+        font.pixelSize: Style.font.subtitle + 4
+        font.bold: true
+      }
     }
   }
 
