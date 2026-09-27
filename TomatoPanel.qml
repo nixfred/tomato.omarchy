@@ -59,7 +59,7 @@ Panel {
     Text {
       anchors.centerIn: parent
       text: chip.label
-      color: chip.danger ? Color.urgent : panel.fg
+      color: chip.danger ? "#ff4d5e" : panel.fg
       font.family: panel.fontFamily
       font.pixelSize: Style.font.bodySmall
       font.bold: chip.selected
@@ -128,7 +128,7 @@ Panel {
             text: svc && svc.error ? svc.error
                   : ((st.focusMin || 25) + "/" + (st.shortMin || 5) + "/" + (st.longMin || 15)
                      + " min · long break every " + (st.longEvery || 4))
-            color: svc && svc.error ? Color.urgent : panel.dim
+            color: svc && svc.error ? "#ff4d5e" : panel.dim
             font.family: panel.fontFamily
             font.pixelSize: Style.font.caption
           }

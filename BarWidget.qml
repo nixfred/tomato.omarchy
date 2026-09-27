@@ -23,7 +23,7 @@ BarWidget {
   readonly property bool showMinutes: String(setting("showMinutes", true)) !== "false"
   readonly property color foreground: bar ? bar.foreground : Color.foreground
   readonly property color ringColor: {
-    if (svc && svc.error) return Color.urgent
+    if (svc && svc.error) return "#ff4d5e"
     if (phase !== "focus") return foreground
     return Color.accent
   }
