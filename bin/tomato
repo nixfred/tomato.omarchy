@@ -1,0 +1,282 @@
+#!/usr/bin/env python3
+"""Tomato: the pomodoro engine behind the nixfred.tomato Omarchy plugin.
+
+Stdlib only. State lives in $XDG_DATA_HOME/tomato (default ~/.local/share/tomato)
+so the timer survives a shell restart. A running phase is stored as an absolute
+end timestamp, never as a countdown, so nothing drifts while the shell is down.
+
+Every command prints the full state as one JSON line. `status` is also the
+clock: when a running phase has passed its end time, status completes it,
+sends the notification and moves on.
+
+Commands:
+  status                      print state (and advance if a phase ended)
+  toggle                      start, pause or resume
+  start [focus|short|long]    start that phase now
+  skip                        end the current phase without counting it
+  reset                       stop and return to an idle focus phase
+  preset FOCUS SHORT LONG     set phase lengths in minutes
+  goal N                      set the daily tomato goal
+  clear-today                 forget today's completed tomatoes
+"""
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import time
+from datetime import date, datetime, timedelta
+
+DATA = os.path.join(os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share"), "tomato")
+STATE = os.path.join(DATA, "state.json")
+HISTORY_DAYS = 120
+LOG_KEEP = 200
+
+DEFAULT = {
+    "phase": "focus",        # focus | short | long
+    "running": False,
+    "endsAt": 0.0,           # epoch seconds, valid while running
+    "remaining": 25 * 60.0,  # seconds left, valid while paused/idle
+    "startedAt": 0.0,
+    "focusMin": 25,
+    "shortMin": 5,
+    "longMin": 15,
+    "longEvery": 4,
+    "goal": 8,
+    "cycle": 0,              # focus sessions completed since the last long break
+    "days": {},              # "YYYY-MM-DD" -> {"count": n, "minutes": m}
+    "log": [],               # recent completed focus sessions: {"end": epoch, "min": m}
+}
+
+
+def load():
+    try:
+        with open(STATE) as f:
+            s = json.load(f)
+    except (OSError, ValueError):
+        s = {}
+    out = dict(DEFAULT)
+    out.update({k: v for k, v in s.items() if k in DEFAULT})
+    return out
+
+
+def save(s):
+    os.makedirs(DATA, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=DATA, prefix=".state.")
+    with os.fdopen(fd, "w") as f:
+        json.dump(s, f)
+    os.replace(tmp, STATE)
+
+
+def phase_len(s, phase):
+    return 60.0 * float({"focus": s["focusMin"], "short": s["shortMin"], "long": s["longMin"]}[phase])
+
+
+def notify(title, body, urgency="normal"):
+    try:
+        subprocess.Popen(["notify-send", "-a", "Tomato", "-u", urgency, "-i", "alarm-symbolic", title, body],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError:
+        pass
+
+
+def today_key(ts=None):
+    return (datetime.fromtimestamp(ts) if ts else datetime.now()).date().isoformat()
+
+
+def complete(s, now):
+    """The running phase reached its end time."""
+    ended = s["phase"]
+    end_ts = s["endsAt"]
+    if ended == "focus":
+        minutes = s["focusMin"]
+        k = today_key(end_ts)
+        d = s["days"].get(k, {"count": 0, "minutes": 0})
+        d["count"] += 1
+        d["minutes"] += minutes
+        s["days"][k] = d
+        s["log"] = (s["log"] + [{"end": end_ts, "min": minutes}])[-LOG_KEEP:]
+        s["cycle"] += 1
+        nxt = "long" if s["cycle"] >= s["longEvery"] else "short"
+        if nxt == "long":
+            s["cycle"] = 0
+        # Breaks start on their own: the whole point is to step away now.
+        s["phase"] = nxt
+        s["running"] = True
+        s["startedAt"] = end_ts
+        s["endsAt"] = end_ts + phase_len(s, nxt)
+        # A laptop that slept through the break should not ring for it later.
+        if s["endsAt"] <= now:
+            s["phase"] = "focus"
+            s["running"] = False
+            s["remaining"] = phase_len(s, "focus")
+            notify("Tomato %d done" % d["count"], "Focus complete. Break already passed while away.")
+        else:
+            notify("Tomato %d done" % d["count"],
+                   "%d min %s break started. Stand up." % ((s["shortMin"] if nxt == "short" else s["longMin"]),
+                                                            "short" if nxt == "short" else "long"))
+    else:
+        # After a break, focus waits for you. An idle timer never rings.
+        s["phase"] = "focus"
+        s["running"] = False
+        s["remaining"] = phase_len(s, "focus")
+        s["endsAt"] = 0.0
+        notify("Break over", "Click the tomato when you are ready to focus.", "normal")
+
+
+def advance(s, now):
+    changed = False
+    guard = 0
+    while s["running"] and s["endsAt"] <= now and guard < 4:
+        complete(s, now)
+        changed = True
+        guard += 1
+    return changed
+
+
+def streak(days):
+    d = date.today()
+    if days.get(d.isoformat(), {}).get("count", 0) == 0:
+        d -= timedelta(days=1)
+    n = 0
+    while days.get(d.isoformat(), {}).get("count", 0) > 0:
+        n += 1
+        d -= timedelta(days=1)
+    return n
+
+
+def best_streak(days):
+    keys = sorted(k for k, v in days.items() if v.get("count", 0) > 0)
+    best = run = 0
+    prev = None
+    for k in keys:
+        cur = date.fromisoformat(k)
+        run = run + 1 if prev and (cur - prev).days == 1 else 1
+        best = max(best, run)
+        prev = cur
+    return best
+
+
+def prune(s):
+    cutoff = (date.today() - timedelta(days=HISTORY_DAYS)).isoformat()
+    s["days"] = {k: v for k, v in s["days"].items() if k >= cutoff}
+
+
+def view(s, now):
+    tk = today_key()
+    week = []
+    for i in range(6, -1, -1):
+        d = date.today() - timedelta(days=i)
+        v = s["days"].get(d.isoformat(), {"count": 0, "minutes": 0})
+        week.append({"date": d.isoformat(), "dow": d.strftime("%a")[:2], "count": v["count"], "minutes": v["minutes"]})
+    total = phase_len(s, s["phase"])
+    remaining = max(0.0, s["endsAt"] - now) if s["running"] else s["remaining"]
+    today = s["days"].get(tk, {"count": 0, "minutes": 0})
+    todays_log = [e for e in s["log"] if today_key(e["end"]) == tk]
+    alltime = sum(v.get("count", 0) for v in s["days"].values())
+    return {
+        "ok": True,
+        "now": now,
+        "phase": s["phase"],
+        "running": s["running"],
+        "endsAt": s["endsAt"],
+        "remaining": remaining,
+        "total": total,
+        "idle": (not s["running"]) and s["phase"] == "focus" and abs(remaining - total) < 0.5,
+        "focusMin": s["focusMin"], "shortMin": s["shortMin"], "longMin": s["longMin"],
+        "longEvery": s["longEvery"], "cycle": s["cycle"], "goal": s["goal"],
+        "todayCount": today["count"], "todayMinutes": today["minutes"],
+        "todayLog": [{"end": e["end"], "min": e["min"],
+                      "label": datetime.fromtimestamp(e["end"]).strftime("%H:%M")} for e in todays_log][::-1],
+        "week": week,
+        "weekCount": sum(w["count"] for w in week),
+        "weekMinutes": sum(w["minutes"] for w in week),
+        "streak": streak(s["days"]),
+        "bestStreak": best_streak(s["days"]),
+        "allTime": alltime,
+        "dataDir": DATA,
+    }
+
+
+def main(argv):
+    cmd = argv[1] if len(argv) > 1 else "status"
+    now = time.time()
+    s = load()
+    changed = advance(s, now)
+
+    if cmd == "status":
+        pass
+    elif cmd == "toggle":
+        if s["running"]:
+            s["remaining"] = max(0.0, s["endsAt"] - now)
+            s["running"] = False
+            s["endsAt"] = 0.0
+        else:
+            if s["remaining"] <= 0:
+                s["remaining"] = phase_len(s, s["phase"])
+            s["running"] = True
+            s["startedAt"] = now
+            s["endsAt"] = now + s["remaining"]
+        changed = True
+    elif cmd == "start":
+        ph = argv[2] if len(argv) > 2 else "focus"
+        if ph not in ("focus", "short", "long"):
+            print(json.dumps({"ok": False, "error": "unknown phase " + ph}))
+            return 2
+        s["phase"] = ph
+        s["running"] = True
+        s["startedAt"] = now
+        s["endsAt"] = now + phase_len(s, ph)
+        changed = True
+    elif cmd == "skip":
+        # Skipping never counts as a completed tomato.
+        if s["phase"] == "focus":
+            s["phase"] = "short"
+        else:
+            s["phase"] = "focus"
+        s["running"] = False
+        s["endsAt"] = 0.0
+        s["remaining"] = phase_len(s, s["phase"])
+        changed = True
+    elif cmd == "reset":
+        s["phase"] = "focus"
+        s["running"] = False
+        s["endsAt"] = 0.0
+        s["remaining"] = phase_len(s, "focus")
+        s["cycle"] = 0
+        changed = True
+    elif cmd == "preset":
+        try:
+            f, sh, lg = (max(1, min(180, int(x))) for x in argv[2:5])
+        except (ValueError, TypeError):
+            print(json.dumps({"ok": False, "error": "preset needs three whole minutes"}))
+            return 2
+        s["focusMin"], s["shortMin"], s["longMin"] = f, sh, lg
+        if not s["running"]:
+            s["remaining"] = phase_len(s, s["phase"])
+        changed = True
+    elif cmd == "goal":
+        try:
+            s["goal"] = max(1, min(24, int(argv[2])))
+        except (ValueError, IndexError):
+            print(json.dumps({"ok": False, "error": "goal needs a number"}))
+            return 2
+        changed = True
+    elif cmd == "clear-today":
+        s["days"].pop(today_key(), None)
+        tk = today_key()
+        s["log"] = [e for e in s["log"] if today_key(e["end"]) != tk]
+        changed = True
+    else:
+        print(json.dumps({"ok": False, "error": "unknown command " + cmd}))
+        return 2
+
+    if changed:
+        prune(s)
+        save(s)
+    print(json.dumps(view(s, now)))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

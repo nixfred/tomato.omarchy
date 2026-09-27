@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "id": "nixfred.tomato",
+  "name": "Tomato",
+  "version": "1.0.0",
+  "author": "nixfred",
+  "license": "MIT",
+  "description": "A pomodoro focus timer for the bar. A ring counts down the current phase; the panel holds presets, today's tomatoes, a 7-day chart, your streak and skip/reset. State is stored as end timestamps in ~/.local/share/tomato, so the timer survives a shell restart.",
+  "kinds": ["service", "bar-widget"],
+  "entryPoints": {
+    "service": "Service.qml",
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Tomato",
+    "description": "Pomodoro ring countdown. Left click starts or pauses, right click opens the panel.",
+    "category": "Productivity",
+    "aliases": ["tomato", "pomodoro", "focus", "timer", "break"],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": { "showMinutes": true },
+    "schema": [
+      {
+        "key": "showMinutes",
+        "type": "boolean",
+        "label": "Show minutes left",
+        "description": "Minutes remaining beside the ring. Off leaves just the ring.",
+        "defaultValue": true
+      }
+    ]
+  },
+  "repository": "https://github.com/nixfred/tomato.omarchy",
+  "homepage": "https://nixfred.com"
+}
